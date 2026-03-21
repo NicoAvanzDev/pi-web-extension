@@ -32,33 +32,69 @@ type SearchResult = {
 	source: "brave" | "duckduckgo";
 };
 
-const MAX_SEARCH_RESULTS = 5;
-const MAX_MARKDOWN_CHARS = 12_000;
+const WEB_TOOLS = ["websearch", "webfetch"] as const;
+const MAX_SEARCH_RESULTS = 4;
+const MAX_SEARCH_SNIPPET_CHARS = 160;
+const MAX_MARKDOWN_CHARS = 6_000;
+const LOW_CONTEXT_MARKDOWN_CHARS = 3_500;
+const FETCH_ANSWER_MAX_TOKENS = 450;
+const STOPWORDS = new Set([
+	"a",
+	"an",
+	"and",
+	"are",
+	"as",
+	"at",
+	"be",
+	"by",
+	"for",
+	"from",
+	"how",
+	"i",
+	"in",
+	"is",
+	"it",
+	"of",
+	"on",
+	"or",
+	"that",
+	"the",
+	"this",
+	"to",
+	"was",
+	"what",
+	"when",
+	"where",
+	"which",
+	"who",
+	"why",
+	"with",
+	"you",
+	"your",
+]);
 
 export default function piWeb(pi: ExtensionAPI) {
+	pi.on("session_start", async () => {
+		setWebToolsActive(pi, false);
+	});
+
 	pi.on("before_agent_start", async (event) => {
 		const prompt = event.prompt;
 		const hasUrl = looksLikeUrlPrompt(prompt);
 		const likelyNeedsWeb = looksLikeWebSearchPrompt(prompt);
+		const needsWebTools = hasUrl || likelyNeedsWeb;
 
-		if (!hasUrl && !likelyNeedsWeb) return;
+		setWebToolsActive(pi, needsWebTools);
+		if (!needsWebTools) return;
 
 		const instructions: string[] = [];
 
 		if (hasUrl) {
-			instructions.push(
-				"The user included a URL.",
-				"Use the webfetch tool before answering questions about that page.",
-				"Do not guess page contents from the URL alone.",
-			);
+			instructions.push("The prompt includes a URL. Use webfetch before answering about that page.");
 		}
 
 		if (likelyNeedsWeb) {
-			instructions.push(
-				"The user likely needs current or external web information.",
-				"Prefer using websearch instead of relying only on model memory.",
-				"If a search result looks promising and the user needs details, use webfetch on that URL.",
-			);
+			instructions.push("The prompt likely needs external or current info. Prefer websearch over memory.");
 		}
 
 		return {
@@ -75,9 +111,8 @@ export default function piWeb(pi: ExtensionAPI) {
 		description: "Search the web using keyless public search endpoints and return a compact list of results",
 		promptSnippet: "Search the web for relevant external pages when local files are insufficient",
 		promptGuidelines: [
-			"Use websearch for docs, articles, references, and general web lookup.",
-			"Use websearch whenever the user asks for recent, current, or external information.",
-			"Use webfetch on promising results if the user needs details from a page.",
+			"Use websearch for docs, articles, references, and current external info.",
+			"Use webfetch on a promising result when the user needs details from a page.",
 		],
 		parameters: websearchSchema,
 
@@ -90,12 +125,11 @@ export default function piWeb(pi: ExtensionAPI) {
 		name: "webfetch",
 		label: "Web Fetch",
 		description:
-			"Fetch a webpage, convert it to markdown, trim large pages, and answer a question using the active pi model",
-		promptSnippet: "Fetch a webpage and answer a specific question about it without dumping raw HTML",
+			"Fetch a webpage, extract the most relevant markdown, and answer a question without dumping raw HTML",
+		promptSnippet: "Fetch a webpage and answer a specific question about it without dumping the page",
 		promptGuidelines: [
 			"Use webfetch whenever the user includes a URL or asks about a specific page.",
-			"Do not answer questions about a provided URL from memory alone; fetch it first.",
-			"Answer the user's question directly instead of returning raw page content.",
+			"Answer directly from the fetched content instead of guessing or quoting the whole page.",
 		],
 		parameters: webfetchSchema,
 
@@ -105,16 +139,27 @@ export default function piWeb(pi: ExtensionAPI) {
 	});
 }
 
+function setWebToolsActive(pi: ExtensionAPI, enabled: boolean) {
+	const active = new Set(pi.getActiveTools());
+
+	for (const tool of WEB_TOOLS) {
+		if (enabled) active.add(tool);
+		else active.delete(tool);
+	}
+
+	pi.setActiveTools([...active]);
+}
+
 async function runWebsearch(params: WebsearchParams, _ctx: ExtensionContext) {
 	const results = await searchKeyless(params.query);
 
 	const text =
 		results.length > 0
 			? results
-					.map(
-						(result, index) =>
-							`${index + 1}. ${result.title}\n${result.url}${result.snippet ? `\n${result.snippet}` : ""}`,
-					)
+					.map((result, index) => {
+						const snippet = result.snippet ? `\n   ${result.snippet}` : "";
+						return `${index + 1}. ${result.title}\n   ${result.url}${snippet}`;
+					})
 					.join("\n\n")
 			: `No results found for: ${params.query}`;
 
@@ -130,14 +175,15 @@ async function runWebsearch(params: WebsearchParams, _ctx: ExtensionContext) {
 async function runWebfetch(params: WebfetchParams, ctx: ExtensionContext, signal?: AbortSignal) {
 	const html = await fetchHtml(params.url, signal);
 	const { title, markdown } = htmlToMarkdown(html, params.url);
-	const trimmedMarkdown = trimLargeDocument(markdown, MAX_MARKDOWN_CHARS);
+	const markdownBudget = getMarkdownBudget(ctx);
+	const focusedMarkdown = selectRelevantMarkdown(markdown, params.prompt, markdownBudget);
 
 	const answer = await summarizeWithPiModel(
 		{
 			url: params.url,
 			title,
 			prompt: params.prompt,
-			markdown: trimmedMarkdown,
+			markdown: focusedMarkdown,
 		},
 		ctx,
 		signal,
@@ -150,10 +196,16 @@ async function runWebfetch(params: WebfetchParams, ctx: ExtensionContext, signal
 			title,
 			prompt: params.prompt,
 			originalMarkdownLength: markdown.length,
-			trimmedMarkdownLength: trimmedMarkdown.length,
+			selectedMarkdownLength: focusedMarkdown.length,
 			model: ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined,
 		},
 	};
+}
+
+function getMarkdownBudget(ctx: ExtensionContext): number {
+	const usage = ctx.getContextUsage();
+	if (usage?.tokens != null && usage.tokens > 100_000) return LOW_CONTEXT_MARKDOWN_CHARS;
+	return MAX_MARKDOWN_CHARS;
 }
 
 async function searchKeyless(query: string): Promise<SearchResult[]> {
@@ -295,7 +347,7 @@ async function duckDuckGoHtmlSearch(query: string): Promise<SearchResult[]> {
 function extractSnippet(raw: string, title: string): string {
 	const text = raw.replace(/\s+/g, " ").trim();
 	if (!text || text === title) return "";
-	return text.slice(0, 240);
+	return text.slice(0, MAX_SEARCH_SNIPPET_CHARS);
 }
 
 async function fetchHtml(url: string, signal?: AbortSignal): Promise<string> {
@@ -356,16 +408,109 @@ function htmlToMarkdown(html: string, baseUrl: string): { title: string; markdow
 	};
 }
 
+function selectRelevantMarkdown(markdown: string, prompt: string, maxChars: number): string {
+	if (markdown.length <= maxChars) return markdown;
+
+	const normalized = markdown.replace(/\n{3,}/g, "\n\n").trim();
+	const sections = splitMarkdownSections(normalized);
+	const keywords = extractKeywords(prompt);
+
+	if (sections.length === 0) {
+		return trimLargeDocument(normalized, maxChars);
+	}
+
+	const scored = sections
+		.map((section, index) => ({
+			section,
+			index,
+			score: scoreSection(section, keywords, index),
+		}))
+		.sort((a, b) => b.score - a.score || a.index - b.index);
+
+	const chosen: string[] = [];
+	let used = 0;
+	const added = new Set<number>();
+
+	for (const entry of scored) {
+		if (entry.score <= 0 && used > 0) break;
+		const compact = compactWhitespace(entry.section).slice(0, Math.min(entry.section.length, 1_500)).trim();
+		if (!compact || added.has(entry.index)) continue;
+		if (used + compact.length + 2 > maxChars) continue;
+		chosen.push(compact);
+		used += compact.length + 2;
+		added.add(entry.index);
+		if (used >= Math.floor(maxChars * 0.85)) break;
+	}
+
+	if (chosen.length === 0) {
+		return trimLargeDocument(normalized, maxChars);
+	}
+
+	const introBudget = Math.max(0, maxChars - used - 40);
+	const intro = introBudget > 400 ? normalized.slice(0, Math.min(introBudget, 800)).trim() : "";
+
+	return [intro, ...chosen]
+		.filter(Boolean)
+		.join("\n\n---\n\n")
+		.slice(0, maxChars)
+		.trim();
+}
+
+function splitMarkdownSections(markdown: string): string[] {
+	const sections = markdown
+		.split(/\n(?=# )|\n(?=## )|\n(?=### )|\n(?=#### )/)
+		.map((section) => section.trim())
+		.filter(Boolean);
+
+	if (sections.length > 1) return sections;
+
+	return markdown
+		.split(/\n\n+/)
+		.map((section) => section.trim())
+		.filter((section) => section.length >= 80);
+}
+
+function extractKeywords(prompt: string): string[] {
+	const words = prompt.toLowerCase().match(/[a-z0-9]{3,}/g) ?? [];
+	const unique = new Set<string>();
+
+	for (const word of words) {
+		if (STOPWORDS.has(word)) continue;
+		unique.add(word);
+	}
+
+	return [...unique].slice(0, 12);
+}
+
+function scoreSection(section: string, keywords: string[], index: number): number {
+	const haystack = section.toLowerCase();
+	let score = index === 0 ? 2 : 0;
+
+	for (const keyword of keywords) {
+		if (haystack.includes(keyword)) score += 5;
+		if (haystack.includes(`# ${keyword}`) || haystack.includes(`## ${keyword}`)) score += 3;
+	}
+
+	if (section.startsWith("# ")) score += 1;
+	if (section.length < 2_000) score += 1;
+
+	return score;
+}
+
+function compactWhitespace(text: string): string {
+	return text.replace(/[ \t]+/g, " ").replace(/\n{3,}/g, "\n\n").trim();
+}
+
 function trimLargeDocument(markdown: string, maxChars: number): string {
 	if (markdown.length <= maxChars) return markdown;
 
-	const headSize = Math.floor(maxChars * 0.7);
-	const tailSize = Math.floor(maxChars * 0.3);
+	const headSize = Math.floor(maxChars * 0.75);
+	const tailSize = Math.floor(maxChars * 0.2);
 
 	const head = markdown.slice(0, headSize).trimEnd();
 	const tail = markdown.slice(-tailSize).trimStart();
 
-	return `${head}\n\n[...content trimmed for brevity...]\n\n${tail}`;
+	return `${head}\n\n[...content trimmed...]\n\n${tail}`;
 }
 
 async function summarizeWithPiModel(
@@ -393,7 +538,7 @@ async function summarizeWithPiModel(
 		ctx.model,
 		{
 			systemPrompt:
-				"You answer questions about webpages using only the provided markdown excerpt. Be concise, accurate, and directly answer the user's question. Never return raw HTML or dump the full page.",
+				"Answer the question using only the provided page excerpt. Be concise, direct, and mention uncertainty if the excerpt is insufficient.",
 			messages: [
 				{
 					role: "user",
@@ -401,13 +546,15 @@ async function summarizeWithPiModel(
 						{
 							type: "text",
 							text: [
-								`URL: ${input.url}`,
-								`Title: ${input.title || "(untitled)"}`,
 								`Question: ${input.prompt}`,
+								`URL: ${input.url}`,
+								input.title ? `Title: ${input.title}` : undefined,
 								"",
-								"Page content (markdown excerpt):",
+								"Excerpt:",
 								input.markdown,
-							].join("\n"),
+							]
+								.filter(Boolean)
+								.join("\n"),
 						},
 					],
 					timestamp: Date.now(),
@@ -417,7 +564,7 @@ async function summarizeWithPiModel(
 		{
 			apiKey,
 			signal,
-			maxTokens: 900,
+			maxTokens: FETCH_ANSWER_MAX_TOKENS,
 			reasoningEffort: "minimal",
 		},
 	);
@@ -444,7 +591,7 @@ function looksLikeWebSearchPrompt(prompt: string): boolean {
 
 	const patterns = [
 		/\b(latest|recent|current|today|yesterday|this week|news)\b/,
-		/\b(search the web|look online|find online|search online|web search)\b/,
+		/\b(search the web|look online|find online|search online|web search|google)\b/,
 		/\b(documentation|docs|release notes|changelog|blog post|article)\b/,
 		/\bwhat changed\b/,
 		/\bup to date\b/,
