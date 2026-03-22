@@ -99,7 +99,7 @@ describe("trimLargeDocument", () => {
     const doc = "x".repeat(2000);
     const trimmed = trimLargeDocument(doc, 500);
     expect(trimmed).toContain("[...content trimmed...]");
-    expect(trimmed.length).toBeLessThanOrEqual(600);
+    expect(trimmed.length).toBeLessThanOrEqual(500);
   });
 
   it("preserves head and tail", () => {
@@ -107,6 +107,14 @@ describe("trimLargeDocument", () => {
     const trimmed = trimLargeDocument(doc, 500);
     expect(trimmed.startsWith("HEAD")).toBe(true);
     expect(trimmed.endsWith("TAIL")).toBe(true);
+  });
+
+  it("respects budget exactly for various sizes", () => {
+    for (const budget of [100, 250, 500, 1000, 5000]) {
+      const doc = "a".repeat(budget * 3);
+      const trimmed = trimLargeDocument(doc, budget);
+      expect(trimmed.length).toBeLessThanOrEqual(budget);
+    }
   });
 });
 

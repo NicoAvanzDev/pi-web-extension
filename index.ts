@@ -1,5 +1,6 @@
 import { complete } from "@mariozechner/pi-ai";
 import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
+import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, truncateHead } from "@mariozechner/pi-coding-agent";
 import { Type, type Static } from "@sinclair/typebox";
 import { JSDOM } from "jsdom";
 import TurndownService from "turndown";
@@ -121,8 +122,8 @@ export default function piWeb(pi: ExtensionAPI) {
     ],
     parameters: websearchSchema,
 
-    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-      return runWebsearch(params as WebsearchParams, ctx);
+    async execute(_toolCallId, params, signal, _onUpdate, ctx) {
+      return runWebsearch(params as WebsearchParams, ctx, signal);
     },
   });
 
@@ -156,10 +157,10 @@ function setWebToolsActive(pi: ExtensionAPI, enabled: boolean) {
   pi.setActiveTools([...active]);
 }
 
-async function runWebsearch(params: WebsearchParams, _ctx: ExtensionContext) {
-  const results = await searchKeyless(params.query);
+async function runWebsearch(params: WebsearchParams, _ctx: ExtensionContext, signal?: AbortSignal) {
+  const results = await searchKeyless(params.query, signal);
 
-  const text =
+  let text =
     results.length > 0
       ? results
           .map((result, index) => {
@@ -169,8 +170,10 @@ async function runWebsearch(params: WebsearchParams, _ctx: ExtensionContext) {
           .join("\n\n")
       : `No results found for: ${params.query}`;
 
+  text = truncateHead(text, { maxLines: DEFAULT_MAX_LINES, maxBytes: DEFAULT_MAX_BYTES }).content;
+
   return {
-    content: [{ type: "text", text } as const],
+    content: [{ type: "text" as const, text }],
     details: {
       query: params.query,
       results,
@@ -184,7 +187,7 @@ async function runWebfetch(params: WebfetchParams, ctx: ExtensionContext, signal
   const markdownBudget = getMarkdownBudget(ctx);
   const focusedMarkdown = selectRelevantMarkdown(markdown, params.prompt, markdownBudget);
 
-  const answer = await summarizeWithPiModel(
+  const rawAnswer = await summarizeWithPiModel(
     {
       url: params.url,
       title,
@@ -195,8 +198,13 @@ async function runWebfetch(params: WebfetchParams, ctx: ExtensionContext, signal
     signal,
   );
 
+  const answer = truncateHead(rawAnswer, {
+    maxLines: DEFAULT_MAX_LINES,
+    maxBytes: DEFAULT_MAX_BYTES,
+  }).content;
+
   return {
-    content: [{ type: "text", text: answer } as const],
+    content: [{ type: "text" as const, text: answer }],
     details: {
       url: params.url,
       title,
@@ -214,31 +222,38 @@ function getMarkdownBudget(ctx: ExtensionContext): number {
   return MAX_MARKDOWN_CHARS;
 }
 
-async function searchKeyless(query: string): Promise<SearchResult[]> {
+async function searchKeyless(query: string, signal?: AbortSignal): Promise<SearchResult[]> {
+  const errors: string[] = [];
+
   try {
-    const brave = await braveSearchHtml(query);
+    const brave = await braveSearchHtml(query, signal);
     if (brave.length > 0) return brave;
-  } catch {
-    // ignore and fall back
+  } catch (err) {
+    errors.push(`Brave: ${err instanceof Error ? err.message : String(err)}`);
   }
 
   try {
-    const ddg = await duckDuckGoHtmlSearch(query);
+    const ddg = await duckDuckGoHtmlSearch(query, signal);
     if (ddg.length > 0) return ddg;
-  } catch {
-    // ignore
+  } catch (err) {
+    errors.push(`DuckDuckGo: ${err instanceof Error ? err.message : String(err)}`);
+  }
+
+  if (errors.length > 0) {
+    console.warn(`[pi-web] searchKeyless failed:\n${errors.join("\n")}`);
   }
 
   return [];
 }
 
-async function braveSearchHtml(query: string): Promise<SearchResult[]> {
+async function braveSearchHtml(query: string, signal?: AbortSignal): Promise<SearchResult[]> {
   const url = new URL("https://search.brave.com/search");
   url.searchParams.set("q", query);
   url.searchParams.set("source", "web");
 
   const response = await fetch(url.toString(), {
     redirect: "follow",
+    signal,
     headers: browserHeaders(),
   });
 
@@ -295,13 +310,14 @@ async function braveSearchHtml(query: string): Promise<SearchResult[]> {
   return results;
 }
 
-async function duckDuckGoHtmlSearch(query: string): Promise<SearchResult[]> {
+async function duckDuckGoHtmlSearch(query: string, signal?: AbortSignal): Promise<SearchResult[]> {
   const url = new URL("https://html.duckduckgo.com/html/");
   url.searchParams.set("q", query);
 
   const response = await fetch(url.toString(), {
     method: "GET",
     redirect: "follow",
+    signal,
     headers: browserHeaders(),
   });
 
@@ -389,7 +405,7 @@ export function htmlToMarkdown(html: string, baseUrl: string): { title: string; 
     "aside",
     "footer",
     "header",
-  ] as const) {
+  ]) {
     document.querySelectorAll(selector).forEach((el: Element) => el.remove());
   }
 
@@ -441,9 +457,7 @@ export function selectRelevantMarkdown(markdown: string, prompt: string, maxChar
 
   for (const entry of scored) {
     if (entry.score <= 0 && used > 0) break;
-    const compact = compactWhitespace(entry.section)
-      .slice(0, Math.min(entry.section.length, 1_500))
-      .trim();
+    const compact = compactWhitespace(entry.section).slice(0, 1_500).trim();
     if (!compact || added.has(entry.index)) continue;
     if (used + compact.length + 2 > maxChars) continue;
     chosen.push(compact);
@@ -513,13 +527,15 @@ export function compactWhitespace(text: string): string {
 export function trimLargeDocument(markdown: string, maxChars: number): string {
   if (markdown.length <= maxChars) return markdown;
 
-  const headSize = Math.floor(maxChars * 0.75);
-  const tailSize = Math.floor(maxChars * 0.2);
+  const marker = "\n\n[...content trimmed...]\n\n";
+  const budget = maxChars - marker.length;
+  const headSize = Math.floor(budget * 0.75);
+  const tailSize = budget - headSize;
 
   const head = markdown.slice(0, headSize).trimEnd();
   const tail = markdown.slice(-tailSize).trimStart();
 
-  return `${head}\n\n[...content trimmed...]\n\n${tail}`;
+  return `${head}${marker}${tail}`.slice(0, maxChars);
 }
 
 async function summarizeWithPiModel(
