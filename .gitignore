@@ -1,6 +1,7 @@
 node_modules/
-*.log
-.env
-.env.*
+.pi/
+.npm/
 dist/
+coverage/
+*.log
 .DS_Store
