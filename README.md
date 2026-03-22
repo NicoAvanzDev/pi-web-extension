@@ -1,34 +1,32 @@
-# pi-web-extension
+# pi web extension
 
-A [pi](https://github.com/badlogic/pi-mono/tree/main/packages/coding-agent) extension that adds two web-aware tools:
+[![npm version](https://img.shields.io/npm/v/pi-web-extension)](https://www.npmjs.com/package/pi-web-extension)
+[![license](https://img.shields.io/npm/l/pi-web-extension)](./LICENSE)
 
-- **`websearch`** -- searches the web using public search endpoints (keyless)
-- **`webfetch`** -- fetches a webpage, extracts the most relevant content, and answers a question about it
+A [pi](https://github.com/badlogic/pi-mono/tree/main/packages/coding-agent) extension that adds **web search and web fetch** tools to the coding agent.
 
-It also nudges pi to use these tools when the user includes a URL or asks for current / external information.
-
-## Features
-
-- Keyless web search fallback flow (Brave, then DuckDuckGo HTML)
+- Keyless web search via Brave and DuckDuckGo HTML fallback
 - Webpage fetching with HTML-to-Markdown conversion
 - Concise, model-generated answers grounded in fetched page content
 - Automatic prompt steering for URL and web-search style prompts
-- Token-aware behavior:
-  - enables `websearch` / `webfetch` only when a prompt likely needs them
-  - keeps search results compact
-  - trims fetched pages to relevant sections before sending them to the model
-  - reduces fetch-answer output budgets for lower token use
+- Token-aware: keeps search results compact, trims fetched pages to relevant sections
 
 ## Install
 
 ```bash
-pi install pi-web-extension
+pi install npm:pi-web-extension
 ```
 
 <details>
 <summary>Alternative install methods</summary>
 
-Install from local checkout:
+From the public git repo:
+
+```bash
+pi install git:github.com/NicoAvanzDev/pi-web-extension
+```
+
+From a local clone:
 
 ```bash
 pi install .
@@ -42,30 +40,7 @@ pi --no-extensions -e ./index.ts
 
 </details>
 
-## Development
-
-```bash
-npm install
-```
-
-Run the full check suite (tests + lint + format check):
-
-```bash
-npm run check
-```
-
-Run individually:
-
-```bash
-npm test            # vitest
-npm run lint        # oxlint
-npm run fmt:check   # oxfmt --check
-npm run fmt         # oxfmt (auto-format)
-```
-
 ## How it works
-
-The extension registers two tools with pi:
 
 ### `websearch`
 
@@ -79,8 +54,22 @@ Fetches a URL, strips non-content elements, converts the HTML to Markdown via Tu
 
 Before each agent turn, the extension checks the user prompt for URLs and web-search intent patterns. When detected, it activates the web tools and injects steering instructions into the system prompt.
 
-## Files
+## Tools
 
-- `index.ts` -- extension implementation
-- `vitest.config.ts` -- test configuration
-- `test/` -- test suite
+The extension exposes LLM-callable tools:
+
+- `websearch`
+- `webfetch`
+
+### `websearch`
+
+Parameters:
+
+- `query: string` -- the search query
+
+### `webfetch`
+
+Parameters:
+
+- `url: string` -- the URL to fetch
+- `prompt: string` -- the question to answer about the page content
