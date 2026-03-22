@@ -1,5 +1,5 @@
 {
-  "name": "pi-web",
+  "name": "pi-web-extension",
   "version": "0.1.0",
   "description": "A pi extension that adds web search and web fetch tools to the coding agent.",
   "keywords": [
