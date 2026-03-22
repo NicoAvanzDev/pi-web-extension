@@ -1,7 +1,26 @@
 {
   "name": "pi-web",
-  "version": "1.0.0",
-  "private": true,
+  "version": "0.1.0",
+  "description": "A pi extension that adds web search and web fetch tools to the coding agent.",
+  "keywords": [
+    "pi-extension",
+    "pi-package",
+    "web-fetch",
+    "web-search"
+  ],
+  "homepage": "https://github.com/NicoAvanzDev/pi-web#readme",
+  "bugs": {
+    "url": "https://github.com/NicoAvanzDev/pi-web/issues"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/NicoAvanzDev/pi-web.git"
+  },
+  "files": [
+    "index.ts",
+    "README.md"
+  ],
   "type": "module",
   "scripts": {
     "build": "echo 'nothing to build'",
@@ -9,12 +28,10 @@
     "lint": "oxlint",
     "fmt": "oxfmt .",
     "fmt:check": "oxfmt --check .",
-    "check": "vitest run && oxlint && oxfmt --check ."
+    "check": "vitest run && oxlint && oxfmt --check .",
+    "prepublishOnly": "npm pack --dry-run"
   },
   "dependencies": {
-    "@mariozechner/pi-ai": "^0.61.1",
-    "@mariozechner/pi-coding-agent": "^0.61.1",
-    "@sinclair/typebox": "^0.34.41",
     "jsdom": "^26.0.0",
     "turndown": "^7.2.0"
   },
@@ -22,6 +39,11 @@
     "oxfmt": "^0.41.0",
     "oxlint": "^1.56.0",
     "vitest": "^4.1.0"
+  },
+  "peerDependencies": {
+    "@mariozechner/pi-ai": "*",
+    "@mariozechner/pi-coding-agent": "*",
+    "@sinclair/typebox": "*"
   },
   "pi": {
     "extensions": [
