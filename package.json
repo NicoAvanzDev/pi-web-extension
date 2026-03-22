@@ -1,14 +1,15 @@
 {
   "name": "pi-web",
-  "private": true,
   "version": "1.0.0",
+  "private": true,
   "type": "module",
   "scripts": {
-    "check": "tsc --noEmit",
-    "build": "echo 'No build needed for pi TypeScript extensions'"
-  },
-  "pi": {
-    "extensions": ["./index.ts"]
+    "build": "echo 'nothing to build'",
+    "test": "vitest run",
+    "lint": "oxlint",
+    "fmt": "oxfmt .",
+    "fmt:check": "oxfmt --check .",
+    "check": "vitest run && oxlint && oxfmt --check ."
   },
   "dependencies": {
     "@mariozechner/pi-ai": "^0.61.1",
@@ -18,9 +19,13 @@
     "turndown": "^7.2.0"
   },
   "devDependencies": {
-    "@types/jsdom": "^21.1.7",
-    "@types/node": "^22.0.0",
-    "@types/turndown": "^5.0.5",
-    "typescript": "^5.8.2"
+    "oxfmt": "^0.41.0",
+    "oxlint": "^1.56.0",
+    "vitest": "^4.1.0"
+  },
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
   }
 }
