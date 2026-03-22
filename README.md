@@ -1,4 +1,4 @@
-# pi-web
+# pi-web-extension
 
 A [pi](https://github.com/badlogic/pi-mono/tree/main/packages/coding-agent) extension that adds two web-aware tools:
 
@@ -22,11 +22,17 @@ It also nudges pi to use these tools when the user includes a URL or asks for cu
 ## Install
 
 ```bash
-pi install .
+pi install pi-web-extension
 ```
 
 <details>
 <summary>Alternative install methods</summary>
+
+Install from local checkout:
+
+```bash
+pi install .
+```
 
 Load without installing:
 
