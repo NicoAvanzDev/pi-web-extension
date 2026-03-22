@@ -1,12 +1,9 @@
 import { describe, it, expect } from "vitest";
 import {
   extractSnippet,
-  extractKeywords,
-  scoreSection,
-  compactWhitespace,
   trimLargeDocument,
-  splitMarkdownSections,
-  selectRelevantMarkdown,
+  stripMarkdownFormatting,
+  urlToHash,
   looksLikeUrlPrompt,
   looksLikeWebSearchPrompt,
   htmlToMarkdown,
@@ -29,64 +26,6 @@ describe("extractSnippet", () => {
   it("truncates to 160 characters", () => {
     const long = "a".repeat(300);
     expect(extractSnippet(long, "title").length).toBe(160);
-  });
-});
-
-describe("extractKeywords", () => {
-  it("extracts non-stopword keywords", () => {
-    const result = extractKeywords("How to install the package");
-    expect(result).toContain("install");
-    expect(result).toContain("package");
-    expect(result).not.toContain("how");
-    expect(result).not.toContain("the");
-  });
-
-  it("returns empty array for stopwords-only input", () => {
-    expect(extractKeywords("the and or is")).toEqual([]);
-  });
-
-  it("deduplicates keywords", () => {
-    const result = extractKeywords("install install install");
-    expect(result).toEqual(["install"]);
-  });
-
-  it("limits to 12 keywords", () => {
-    const words = Array.from({ length: 20 }, (_, i) => `keyword${i}`).join(" ");
-    expect(extractKeywords(words).length).toBe(12);
-  });
-});
-
-describe("scoreSection", () => {
-  it("gives bonus for first section", () => {
-    const score0 = scoreSection("some text", [], 0);
-    const score1 = scoreSection("some text", [], 1);
-    expect(score0).toBeGreaterThan(score1);
-  });
-
-  it("scores higher when keywords match", () => {
-    const withKeyword = scoreSection("install the package", ["install"], 1);
-    const withoutKeyword = scoreSection("hello world here", ["install"], 1);
-    expect(withKeyword).toBeGreaterThan(withoutKeyword);
-  });
-
-  it("gives heading bonus", () => {
-    const withHeading = scoreSection("# install guide", ["install"], 1);
-    const noHeading = scoreSection("install guide text", ["install"], 1);
-    expect(withHeading).toBeGreaterThan(noHeading);
-  });
-});
-
-describe("compactWhitespace", () => {
-  it("collapses multiple spaces to one", () => {
-    expect(compactWhitespace("a   b    c")).toBe("a b c");
-  });
-
-  it("collapses 3+ newlines to 2", () => {
-    expect(compactWhitespace("a\n\n\n\nb")).toBe("a\n\nb");
-  });
-
-  it("trims leading and trailing whitespace", () => {
-    expect(compactWhitespace("  hello  ")).toBe("hello");
   });
 });
 
@@ -118,40 +57,50 @@ describe("trimLargeDocument", () => {
   });
 });
 
-describe("splitMarkdownSections", () => {
-  it("splits on heading markers", () => {
-    const md = "# Intro\nSome text\n# Next\nMore text";
-    const sections = splitMarkdownSections(md);
-    expect(sections.length).toBe(2);
-    expect(sections[0]).toContain("Intro");
-    expect(sections[1]).toContain("Next");
+describe("stripMarkdownFormatting", () => {
+  it("removes heading markers", () => {
+    expect(stripMarkdownFormatting("# Hello\n## World")).toBe("Hello\nWorld");
   });
 
-  it("falls back to paragraph splitting for no headings", () => {
-    const longPara = "a".repeat(100);
-    const md = `${longPara}\n\n${longPara}\n\n${longPara}`;
-    const sections = splitMarkdownSections(md);
-    expect(sections.length).toBe(3);
+  it("removes bold and italic markers", () => {
+    expect(stripMarkdownFormatting("**bold** and *italic*")).toBe("bold and italic");
   });
 
-  it("filters short paragraphs in fallback mode", () => {
-    const md = "short\n\nshort\n\n" + "a".repeat(100);
-    const sections = splitMarkdownSections(md);
-    expect(sections.length).toBe(1);
+  it("removes inline code backticks", () => {
+    expect(stripMarkdownFormatting("use `foo()` here")).toBe("use foo() here");
+  });
+
+  it("extracts link text", () => {
+    expect(stripMarkdownFormatting("[click here](https://example.com)")).toBe("click here");
+  });
+
+  it("removes list markers", () => {
+    expect(stripMarkdownFormatting("- item one\n* item two\n+ item three")).toBe(
+      "item one\nitem two\nitem three",
+    );
+  });
+
+  it("removes blockquote markers", () => {
+    expect(stripMarkdownFormatting("> quoted text")).toBe("quoted text");
+  });
+
+  it("collapses excessive newlines", () => {
+    expect(stripMarkdownFormatting("a\n\n\n\nb")).toBe("a\n\nb");
   });
 });
 
-describe("selectRelevantMarkdown", () => {
-  it("returns original if within budget", () => {
-    const md = "Some short markdown";
-    expect(selectRelevantMarkdown(md, "query", 1000)).toBe(md);
+describe("urlToHash", () => {
+  it("returns a 12-char hex string", () => {
+    const hash = urlToHash("https://example.com");
+    expect(hash).toMatch(/^[a-f0-9]{12}$/);
   });
 
-  it("selects relevant sections for long documents", () => {
-    const sections = Array.from({ length: 20 }, (_, i) => `# Section ${i}\n${"x".repeat(200)}`);
-    const md = sections.join("\n");
-    const result = selectRelevantMarkdown(md, "Section 5", 500);
-    expect(result.length).toBeLessThanOrEqual(500);
+  it("returns the same hash for the same URL", () => {
+    expect(urlToHash("https://example.com")).toBe(urlToHash("https://example.com"));
+  });
+
+  it("returns different hashes for different URLs", () => {
+    expect(urlToHash("https://example.com")).not.toBe(urlToHash("https://other.com"));
   });
 });
 
