@@ -6,10 +6,10 @@
 A [pi](https://github.com/badlogic/pi-mono/tree/main/packages/coding-agent) extension that adds **web search and web fetch** tools to the coding agent.
 
 - Keyless web search via Brave and DuckDuckGo HTML fallback
-- Webpage fetching with HTML-to-Markdown conversion
-- Concise, model-generated answers grounded in fetched page content
+- Webpage fetching with HTML-to-Markdown conversion, saved to a temp file
+- Agent reads fetched content in chunks via the read tool — no context bloat
 - Automatic prompt steering for URL and web-search style prompts
-- Token-aware: keeps search results compact, trims fetched pages to relevant sections
+- Token-aware: keeps search results compact, trims oversized pages
 
 ## Install
 
@@ -48,7 +48,7 @@ Runs a keyless web search by scraping public search engines. Tries Brave first, 
 
 ### `webfetch`
 
-Fetches a URL, strips non-content elements, converts the HTML to Markdown via Turndown, selects the most relevant sections using keyword scoring, then asks the active pi model to answer the user's question based on the excerpt. If the model returns no usable text, it falls back to returning the relevant excerpt instead of failing.
+Fetches a URL, strips non-content elements, converts the HTML to Markdown via Turndown, and saves the result to a temp file in the pi session directory. Returns metadata (file path, title, content length, preview) so the agent can read the file in chunks as needed.
 
 ### Prompt steering
 
@@ -72,4 +72,4 @@ Parameters:
 Parameters:
 
 - `url: string` -- the URL to fetch
-- `prompt: string` -- the question to answer about the page content
+- `format?: "markdown" | "text" | "html"` -- output format (default: `"markdown"`)

@@ -1,6 +1,9 @@
-import { complete } from "@mariozechner/pi-ai";
 import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
+import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, truncateHead } from "@mariozechner/pi-coding-agent";
 import { Type, type Static } from "@sinclair/typebox";
+import { createHash } from "node:crypto";
+import { mkdir, writeFile } from "node:fs/promises";
+import { join } from "node:path";
 import { JSDOM } from "jsdom";
 import TurndownService from "turndown";
 
@@ -16,10 +19,11 @@ const webfetchSchema = Type.Object({
     minLength: 1,
     description: "The URL to fetch",
   }),
-  prompt: Type.String({
-    minLength: 1,
-    description: "The question to answer about the page",
-  }),
+  format: Type.Optional(
+    Type.Union([Type.Literal("markdown"), Type.Literal("text"), Type.Literal("html")], {
+      description: "Output format (default: markdown)",
+    }),
+  ),
 });
 
 type WebsearchParams = Static<typeof websearchSchema>;
@@ -35,44 +39,8 @@ type SearchResult = {
 const WEB_TOOLS = ["websearch", "webfetch"] as const;
 const MAX_SEARCH_RESULTS = 4;
 const MAX_SEARCH_SNIPPET_CHARS = 160;
-const MAX_MARKDOWN_CHARS = 6_000;
-const LOW_CONTEXT_MARKDOWN_CHARS = 3_500;
-const FETCH_ANSWER_MAX_TOKENS = 450;
-const FALLBACK_EXCERPT_CHARS = 1_200;
-const STOPWORDS = new Set([
-  "a",
-  "an",
-  "and",
-  "are",
-  "as",
-  "at",
-  "be",
-  "by",
-  "for",
-  "from",
-  "how",
-  "i",
-  "in",
-  "is",
-  "it",
-  "of",
-  "on",
-  "or",
-  "that",
-  "the",
-  "this",
-  "to",
-  "was",
-  "what",
-  "when",
-  "where",
-  "which",
-  "who",
-  "why",
-  "with",
-  "you",
-  "your",
-]);
+const MAX_MARKDOWN_CHARS = 200_000;
+const PREVIEW_CHARS = 500;
 
 export default function piWeb(pi: ExtensionAPI) {
   pi.on("session_start", async () => {
@@ -122,8 +90,8 @@ export default function piWeb(pi: ExtensionAPI) {
     ],
     parameters: websearchSchema,
 
-    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-      return runWebsearch(params as WebsearchParams, ctx);
+    async execute(_toolCallId, params, signal, _onUpdate, ctx) {
+      return runWebsearch(params as WebsearchParams, ctx, signal);
     },
   });
 
@@ -131,12 +99,12 @@ export default function piWeb(pi: ExtensionAPI) {
     name: "webfetch",
     label: "Web Fetch",
     description:
-      "Fetch a webpage, extract the most relevant markdown, and answer a question without dumping raw HTML",
-    promptSnippet:
-      "Fetch a webpage and answer a specific question about it without dumping the page",
+      "Fetch a webpage, convert to markdown, save to a temp file, and return metadata with a preview. Use the read tool to access the full content.",
+    promptSnippet: "Fetch a webpage and save its content to a local file for reading",
     promptGuidelines: [
-      "Use webfetch whenever the user includes a URL or asks about a specific page.",
-      "Answer directly from the fetched content instead of guessing or quoting the whole page.",
+      "Use webfetch to download a URL. Content is saved to a temp file — use the read tool to access it in chunks.",
+      "The tool returns the file path, title, content length, and a short preview of the content.",
+      "Do NOT ask webfetch a question. Fetch first, then read the file to find what you need.",
     ],
     parameters: webfetchSchema,
 
@@ -157,10 +125,10 @@ function setWebToolsActive(pi: ExtensionAPI, enabled: boolean) {
   pi.setActiveTools([...active]);
 }
 
-async function runWebsearch(params: WebsearchParams, _ctx: ExtensionContext) {
-  const results = await searchKeyless(params.query);
+async function runWebsearch(params: WebsearchParams, _ctx: ExtensionContext, signal?: AbortSignal) {
+  const results = await searchKeyless(params.query, signal);
 
-  const text =
+  let text =
     results.length > 0
       ? results
           .map((result, index) => {
@@ -170,8 +138,10 @@ async function runWebsearch(params: WebsearchParams, _ctx: ExtensionContext) {
           .join("\n\n")
       : `No results found for: ${params.query}`;
 
+  text = truncateHead(text, { maxLines: DEFAULT_MAX_LINES, maxBytes: DEFAULT_MAX_BYTES }).content;
+
   return {
-    content: [{ type: "text", text } as const],
+    content: [{ type: "text" as const, text }],
     details: {
       query: params.query,
       results,
@@ -180,66 +150,98 @@ async function runWebsearch(params: WebsearchParams, _ctx: ExtensionContext) {
 }
 
 async function runWebfetch(params: WebfetchParams, ctx: ExtensionContext, signal?: AbortSignal) {
+  const format = params.format ?? "markdown";
   const html = await fetchHtml(params.url, signal);
-  const { title, markdown } = htmlToMarkdown(html, params.url);
-  const markdownBudget = getMarkdownBudget(ctx);
-  const focusedMarkdown = selectRelevantMarkdown(markdown, params.prompt, markdownBudget);
 
-  const answer = await summarizeWithPiModel(
-    {
-      url: params.url,
-      title,
-      prompt: params.prompt,
-      markdown: focusedMarkdown,
-    },
-    ctx,
-    signal,
-  );
+  let content: string;
+  let title: string;
+  let ext: string;
+
+  if (format === "html") {
+    content = html;
+    title = extractTitle(html, params.url);
+    ext = ".html";
+  } else if (format === "text") {
+    const result = htmlToMarkdown(html, params.url);
+    title = result.title;
+    content = stripMarkdownFormatting(result.markdown);
+    ext = ".txt";
+  } else {
+    const result = htmlToMarkdown(html, params.url);
+    title = result.title;
+    content = result.markdown;
+    ext = ".md";
+  }
+
+  // Trim to a reasonable max to avoid writing huge files
+  if (content.length > MAX_MARKDOWN_CHARS) {
+    content = trimLargeDocument(content, MAX_MARKDOWN_CHARS);
+  }
+
+  const sessionDir = ctx.sessionManager.getSessionDir();
+  const filePath = await writeTempFile(sessionDir, params.url, content, ext);
+  const preview = content.slice(0, PREVIEW_CHARS).trim();
+
+  const text = [
+    `File: ${filePath}`,
+    title ? `Title: ${title}` : undefined,
+    `Content length: ${content.length} chars`,
+    "",
+    "Preview:",
+    preview,
+  ]
+    .filter((line) => line != null)
+    .join("\n");
+
+  const truncated = truncateHead(text, {
+    maxLines: DEFAULT_MAX_LINES,
+    maxBytes: DEFAULT_MAX_BYTES,
+  }).content;
 
   return {
-    content: [{ type: "text", text: answer } as const],
+    content: [{ type: "text" as const, text: truncated }],
     details: {
       url: params.url,
       title,
-      prompt: params.prompt,
-      originalMarkdownLength: markdown.length,
-      selectedMarkdownLength: focusedMarkdown.length,
-      model: ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined,
+      filePath,
+      contentLength: content.length,
+      format,
     },
   };
 }
 
-function getMarkdownBudget(ctx: ExtensionContext): number {
-  const usage = ctx.getContextUsage();
-  if (usage?.tokens != null && usage.tokens > 100_000) return LOW_CONTEXT_MARKDOWN_CHARS;
-  return MAX_MARKDOWN_CHARS;
-}
+async function searchKeyless(query: string, signal?: AbortSignal): Promise<SearchResult[]> {
+  const errors: string[] = [];
 
-async function searchKeyless(query: string): Promise<SearchResult[]> {
   try {
-    const brave = await braveSearchHtml(query);
+    const brave = await braveSearchHtml(query, signal);
     if (brave.length > 0) return brave;
-  } catch {
-    // ignore and fall back
+  } catch (err) {
+    errors.push(`Brave: ${err instanceof Error ? err.message : String(err)}`);
   }
 
   try {
-    const ddg = await duckDuckGoHtmlSearch(query);
+    const ddg = await duckDuckGoHtmlSearch(query, signal);
     if (ddg.length > 0) return ddg;
-  } catch {
-    // ignore
+  } catch (err) {
+    errors.push(`DuckDuckGo: ${err instanceof Error ? err.message : String(err)}`);
+  }
+
+  if (errors.length > 0) {
+    console.warn(`[pi-web] searchKeyless failed:\n${errors.join("\n")}`);
   }
 
   return [];
 }
 
-async function braveSearchHtml(query: string): Promise<SearchResult[]> {
+async function braveSearchHtml(query: string, signal?: AbortSignal): Promise<SearchResult[]> {
   const url = new URL("https://search.brave.com/search");
   url.searchParams.set("q", query);
   url.searchParams.set("source", "web");
 
   const response = await fetch(url.toString(), {
     redirect: "follow",
+    signal,
     headers: browserHeaders(),
   });
 
@@ -296,13 +298,14 @@ async function braveSearchHtml(query: string): Promise<SearchResult[]> {
   return results;
 }
 
-async function duckDuckGoHtmlSearch(query: string): Promise<SearchResult[]> {
+async function duckDuckGoHtmlSearch(query: string, signal?: AbortSignal): Promise<SearchResult[]> {
   const url = new URL("https://html.duckduckgo.com/html/");
   url.searchParams.set("q", query);
 
   const response = await fetch(url.toString(), {
     method: "GET",
     redirect: "follow",
+    signal,
     headers: browserHeaders(),
   });
 
@@ -390,7 +393,7 @@ export function htmlToMarkdown(html: string, baseUrl: string): { title: string; 
     "aside",
     "footer",
     "header",
-  ] as const) {
+  ]) {
     document.querySelectorAll(selector).forEach((el: Element) => el.remove());
   }
 
@@ -417,213 +420,55 @@ export function htmlToMarkdown(html: string, baseUrl: string): { title: string; 
   };
 }
 
-export function selectRelevantMarkdown(markdown: string, prompt: string, maxChars: number): string {
-  if (markdown.length <= maxChars) return markdown;
-
-  const normalized = markdown.replace(/\n{3,}/g, "\n\n").trim();
-  const sections = splitMarkdownSections(normalized);
-  const keywords = extractKeywords(prompt);
-
-  if (sections.length === 0) {
-    return trimLargeDocument(normalized, maxChars);
-  }
-
-  const scored = sections
-    .map((section, index) => ({
-      section,
-      index,
-      score: scoreSection(section, keywords, index),
-    }))
-    .sort((a, b) => b.score - a.score || a.index - b.index);
-
-  const chosen: string[] = [];
-  let used = 0;
-  const added = new Set<number>();
-
-  for (const entry of scored) {
-    if (entry.score <= 0 && used > 0) break;
-    const compact = compactWhitespace(entry.section)
-      .slice(0, Math.min(entry.section.length, 1_500))
-      .trim();
-    if (!compact || added.has(entry.index)) continue;
-    if (used + compact.length + 2 > maxChars) continue;
-    chosen.push(compact);
-    used += compact.length + 2;
-    added.add(entry.index);
-    if (used >= Math.floor(maxChars * 0.85)) break;
-  }
-
-  if (chosen.length === 0) {
-    return trimLargeDocument(normalized, maxChars);
-  }
-
-  const introBudget = Math.max(0, maxChars - used - 40);
-  const intro = introBudget > 400 ? normalized.slice(0, Math.min(introBudget, 800)).trim() : "";
-
-  return [intro, ...chosen].filter(Boolean).join("\n\n---\n\n").slice(0, maxChars).trim();
-}
-
-export function splitMarkdownSections(markdown: string): string[] {
-  const sections = markdown
-    .split(/\n(?=# )|\n(?=## )|\n(?=### )|\n(?=#### )/)
-    .map((section) => section.trim())
-    .filter(Boolean);
-
-  if (sections.length > 1) return sections;
-
-  return markdown
-    .split(/\n\n+/)
-    .map((section) => section.trim())
-    .filter((section) => section.length >= 80);
-}
-
-export function extractKeywords(prompt: string): string[] {
-  const words = prompt.toLowerCase().match(/[a-z0-9]{3,}/g) ?? [];
-  const unique = new Set<string>();
-
-  for (const word of words) {
-    if (STOPWORDS.has(word)) continue;
-    unique.add(word);
-  }
-
-  return [...unique].slice(0, 12);
-}
-
-export function scoreSection(section: string, keywords: string[], index: number): number {
-  const haystack = section.toLowerCase();
-  let score = index === 0 ? 2 : 0;
-
-  for (const keyword of keywords) {
-    if (haystack.includes(keyword)) score += 5;
-    if (haystack.includes(`# ${keyword}`) || haystack.includes(`## ${keyword}`)) score += 3;
-  }
-
-  if (section.startsWith("# ")) score += 1;
-  if (section.length < 2_000) score += 1;
-
-  return score;
-}
-
-export function compactWhitespace(text: string): string {
-  return text
-    .replace(/[ \t]+/g, " ")
-    .replace(/\n{3,}/g, "\n\n")
-    .trim();
-}
-
 export function trimLargeDocument(markdown: string, maxChars: number): string {
   if (markdown.length <= maxChars) return markdown;
 
-  const headSize = Math.floor(maxChars * 0.75);
-  const tailSize = Math.floor(maxChars * 0.2);
+  const marker = "\n\n[...content trimmed...]\n\n";
+  const budget = maxChars - marker.length;
+  const headSize = Math.floor(budget * 0.75);
+  const tailSize = budget - headSize;
 
   const head = markdown.slice(0, headSize).trimEnd();
   const tail = markdown.slice(-tailSize).trimStart();
 
-  return `${head}\n\n[...content trimmed...]\n\n${tail}`;
+  return `${head}${marker}${tail}`.slice(0, maxChars);
 }
 
-async function summarizeWithPiModel(
-  input: {
-    url: string;
-    title: string;
-    prompt: string;
-    markdown: string;
-  },
-  ctx: ExtensionContext,
-  signal?: AbortSignal,
-): Promise<string> {
-  const fallback = buildWebfetchFallbackAnswer(input);
-
-  if (!input.markdown.trim()) {
-    return fallback;
-  }
-
-  if (!ctx.model) {
-    throw new Error("No active pi model available. Use /login or configure a model first.");
-  }
-
-  const apiKey = await ctx.modelRegistry.getApiKey(ctx.model);
-  if (!apiKey) {
-    throw new Error(
-      `No credentials available for active model ${ctx.model.provider}/${ctx.model.id}. Use /login or configure that provider.`,
-    );
-  }
-
-  const response = await complete(
-    ctx.model,
-    {
-      systemPrompt:
-        "Answer the question using only the provided page excerpt. Be concise, direct, and mention uncertainty if the excerpt is insufficient.",
-      messages: [
-        {
-          role: "user",
-          content: [
-            {
-              type: "text",
-              text: [
-                `Question: ${input.prompt}`,
-                `URL: ${input.url}`,
-                input.title ? `Title: ${input.title}` : undefined,
-                "",
-                "Excerpt:",
-                input.markdown,
-              ]
-                .filter(Boolean)
-                .join("\n"),
-            },
-          ],
-          timestamp: Date.now(),
-        },
-      ],
-    },
-    {
-      apiKey,
-      signal,
-      maxTokens: FETCH_ANSWER_MAX_TOKENS,
-      reasoningEffort: "minimal",
-    },
-  );
-
-  const text = extractModelText(response.content);
-  if (text) return text;
-
-  return fallback;
+function extractTitle(html: string, _baseUrl: string): string {
+  const match = html.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
+  return match ? match[1].replace(/\s+/g, " ").trim() : "";
 }
 
-export function extractModelText(content: Array<{ type: string; text?: string }>): string {
-  return content
-    .filter(
-      (c): c is { type: "text"; text: string } => c.type === "text" && typeof c.text === "string",
-    )
-    .map((c) => c.text.trim())
-    .filter(Boolean)
-    .join("\n")
+export function stripMarkdownFormatting(markdown: string): string {
+  return markdown
+    .replace(/^#{1,6}\s+/gm, "") // headings
+    .replace(/\*\*([^*]+)\*\*/g, "$1") // bold
+    .replace(/\*([^*]+)\*/g, "$1") // italic
+    .replace(/`([^`]+)`/g, "$1") // inline code
+    .replace(/\[([^\]]+)\]\([^)]+\)/g, "$1") // links
+    .replace(/^[-*+]\s+/gm, "") // list markers
+    .replace(/^>\s+/gm, "") // blockquotes
+    .replace(/^---+$/gm, "") // horizontal rules
+    .replace(/\n{3,}/g, "\n\n")
     .trim();
 }
 
-export function buildWebfetchFallbackAnswer(input: {
-  url: string;
-  title: string;
-  prompt: string;
-  markdown: string;
-}): string {
-  const excerpt = compactWhitespace(input.markdown).slice(0, FALLBACK_EXCERPT_CHARS).trim();
+export function urlToHash(url: string): string {
+  return createHash("sha256").update(url).digest("hex").slice(0, 12);
+}
 
-  const header = [
-    "The page was fetched, but the model did not return a usable text answer.",
-    `Question: ${input.prompt}`,
-    input.title ? `Title: ${input.title}` : undefined,
-    `URL: ${input.url}`,
-  ]
-    .filter(Boolean)
-    .join("\n");
-
-  if (!excerpt) {
-    return `${header}\n\nI also could not extract meaningful readable text from the page.`;
-  }
-
-  return `${header}\n\nRelevant excerpt:\n${excerpt}`;
+async function writeTempFile(
+  sessionDir: string,
+  url: string,
+  content: string,
+  ext: string,
+): Promise<string> {
+  const dir = join(sessionDir, "tmp");
+  await mkdir(dir, { recursive: true });
+  const hash = urlToHash(url);
+  const filePath = join(dir, `fetch-${hash}${ext}`);
+  await writeFile(filePath, content, "utf-8");
+  return filePath;
 }
 
 export function looksLikeUrlPrompt(prompt: string): boolean {

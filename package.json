@@ -28,7 +28,7 @@
     "lint": "oxlint",
     "fmt": "oxfmt .",
     "fmt:check": "oxfmt --check .",
-    "check": "vitest run && oxlint && oxfmt --check .",
+    "check": "tsc --noEmit && vitest run && oxlint && oxfmt --check .",
     "prepublishOnly": "npm pack --dry-run"
   },
   "dependencies": {
@@ -36,14 +36,19 @@
     "turndown": "^7.2.0"
   },
   "devDependencies": {
+    "@types/jsdom": "^28.0.1",
+    "@types/turndown": "^5.0.6",
     "oxfmt": "^0.41.0",
     "oxlint": "^1.56.0",
+    "typescript": "^5.9.3",
     "vitest": "^4.1.0"
   },
   "peerDependencies": {
-    "@mariozechner/pi-ai": "*",
-    "@mariozechner/pi-coding-agent": "*",
-    "@sinclair/typebox": "*"
+    "@mariozechner/pi-coding-agent": ">=0.61.0",
+    "@sinclair/typebox": ">=0.34.0"
+  },
+  "engines": {
+    "node": ">=22"
   },
   "pi": {
     "extensions": [
