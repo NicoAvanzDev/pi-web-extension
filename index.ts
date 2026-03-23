@@ -40,7 +40,15 @@ const WEB_TOOLS = ["websearch", "webfetch"] as const;
 const MAX_SEARCH_RESULTS = 4;
 const MAX_SEARCH_SNIPPET_CHARS = 160;
 const MAX_MARKDOWN_CHARS = 200_000;
+const MAX_FETCH_BYTES = 5_000_000;
 const PREVIEW_CHARS = 500;
+const ALLOWED_CONTENT_TYPES = [
+  "text/html",
+  "application/xhtml+xml",
+  "text/plain",
+  "application/xml",
+  "text/xml",
+];
 
 export default function piWeb(pi: ExtensionAPI) {
   pi.on("session_start", async () => {
@@ -126,17 +134,21 @@ function setWebToolsActive(pi: ExtensionAPI, enabled: boolean) {
 }
 
 async function runWebsearch(params: WebsearchParams, _ctx: ExtensionContext, signal?: AbortSignal) {
-  const results = await searchKeyless(params.query, signal);
+  const { results, errors } = await searchKeyless(params.query, signal);
 
-  let text =
-    results.length > 0
-      ? results
-          .map((result, index) => {
-            const snippet = result.snippet ? `\n   ${result.snippet}` : "";
-            return `${index + 1}. ${result.title}\n   ${result.url}${snippet}`;
-          })
-          .join("\n\n")
-      : `No results found for: ${params.query}`;
+  let text: string;
+  if (results.length > 0) {
+    text = results
+      .map((result, index) => {
+        const snippet = result.snippet ? `\n   ${result.snippet}` : "";
+        return `${index + 1}. ${result.title}\n   ${result.url}${snippet}`;
+      })
+      .join("\n\n");
+  } else if (errors.length > 0) {
+    text = `Search failed for: ${params.query}\n\nAll search providers returned errors:\n${errors.map((e) => `- ${e}`).join("\n")}`;
+  } else {
+    text = `No results found for: ${params.query}`;
+  }
 
   text = truncateHead(text, { maxLines: DEFAULT_MAX_LINES, maxBytes: DEFAULT_MAX_BYTES }).content;
 
@@ -145,11 +157,14 @@ async function runWebsearch(params: WebsearchParams, _ctx: ExtensionContext, sig
     details: {
       query: params.query,
       results,
+      errors: errors.length > 0 ? errors : undefined,
     },
   };
 }
 
 async function runWebfetch(params: WebfetchParams, ctx: ExtensionContext, signal?: AbortSignal) {
+  validateFetchUrl(params.url);
+
   const format = params.format ?? "markdown";
   const html = await fetchHtml(params.url, signal);
 
@@ -182,7 +197,15 @@ async function runWebfetch(params: WebfetchParams, ctx: ExtensionContext, signal
   const filePath = await writeTempFile(sessionDir, params.url, content, ext);
   const preview = content.slice(0, PREVIEW_CHARS).trim();
 
+  let warning: string | undefined;
+  if (content.length === 0) {
+    warning = "Warning: no readable content was extracted from this page.";
+  } else if (content.length < 100) {
+    warning = "Warning: very little content was extracted from this page.";
+  }
+
   const text = [
+    warning,
     `File: ${filePath}`,
     title ? `Title: ${title}` : undefined,
     `Content length: ${content.length} chars`,
@@ -210,19 +233,22 @@ async function runWebfetch(params: WebfetchParams, ctx: ExtensionContext, signal
   };
 }
 
-async function searchKeyless(query: string, signal?: AbortSignal): Promise<SearchResult[]> {
+async function searchKeyless(
+  query: string,
+  signal?: AbortSignal,
+): Promise<{ results: SearchResult[]; errors: string[] }> {
   const errors: string[] = [];
 
   try {
     const brave = await braveSearchHtml(query, signal);
-    if (brave.length > 0) return brave;
+    if (brave.length > 0) return { results: brave, errors: [] };
   } catch (err) {
     errors.push(`Brave: ${err instanceof Error ? err.message : String(err)}`);
   }
 
   try {
     const ddg = await duckDuckGoHtmlSearch(query, signal);
-    if (ddg.length > 0) return ddg;
+    if (ddg.length > 0) return { results: ddg, errors: [] };
   } catch (err) {
     errors.push(`DuckDuckGo: ${err instanceof Error ? err.message : String(err)}`);
   }
@@ -231,7 +257,7 @@ async function searchKeyless(query: string, signal?: AbortSignal): Promise<Searc
     console.warn(`[pi-web] searchKeyless failed:\n${errors.join("\n")}`);
   }
 
-  return [];
+  return { results: [], errors };
 }
 
 async function braveSearchHtml(query: string, signal?: AbortSignal): Promise<SearchResult[]> {
@@ -357,9 +383,42 @@ async function duckDuckGoHtmlSearch(query: string, signal?: AbortSignal): Promis
 }
 
 export function extractSnippet(raw: string, title: string): string {
-  const text = raw.replace(/\s+/g, " ").trim();
+  let text = raw.replace(/\s+/g, " ").trim();
   if (!text || text === title) return "";
+  if (text.startsWith(title)) text = text.slice(title.length).trim();
+  if (!text) return "";
   return text.slice(0, MAX_SEARCH_SNIPPET_CHARS);
+}
+
+export function validateFetchUrl(url: string): void {
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    throw new Error(`Invalid URL: ${url}`);
+  }
+
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+    throw new Error(
+      `Unsupported URL scheme "${parsed.protocol}" — only http: and https: are allowed`,
+    );
+  }
+
+  const hostname = parsed.hostname;
+  if (
+    hostname === "localhost" ||
+    hostname === "127.0.0.1" ||
+    hostname === "0.0.0.0" ||
+    hostname === "[::1]" ||
+    hostname.startsWith("169.254.") ||
+    hostname.startsWith("10.") ||
+    hostname.startsWith("192.168.") ||
+    /^172\.(1[6-9]|2\d|3[01])\./.test(hostname) ||
+    hostname.endsWith(".local") ||
+    hostname.endsWith(".internal")
+  ) {
+    throw new Error(`Blocked: "${hostname}" looks like a private or internal address`);
+  }
 }
 
 async function fetchHtml(url: string, signal?: AbortSignal): Promise<string> {
@@ -374,7 +433,28 @@ async function fetchHtml(url: string, signal?: AbortSignal): Promise<string> {
     throw new Error(`Failed to fetch URL (${response.status}): ${body.slice(0, 500)}`);
   }
 
-  return response.text();
+  const contentType = (response.headers.get("content-type") ?? "").toLowerCase();
+  if (contentType && !ALLOWED_CONTENT_TYPES.some((t) => contentType.includes(t))) {
+    throw new Error(
+      `Unsupported content type "${contentType}" — expected HTML or text. URL: ${url}`,
+    );
+  }
+
+  const contentLength = Number(response.headers.get("content-length") || "0");
+  if (contentLength > MAX_FETCH_BYTES) {
+    throw new Error(
+      `Response too large (${contentLength} bytes, max ${MAX_FETCH_BYTES}). URL: ${url}`,
+    );
+  }
+
+  const text = await response.text();
+  if (text.length > MAX_FETCH_BYTES) {
+    throw new Error(
+      `Response body too large (${text.length} bytes, max ${MAX_FETCH_BYTES}). URL: ${url}`,
+    );
+  }
+
+  return text;
 }
 
 export function htmlToMarkdown(html: string, baseUrl: string): { title: string; markdown: string } {
@@ -442,13 +522,29 @@ function extractTitle(html: string, _baseUrl: string): string {
 export function stripMarkdownFormatting(markdown: string): string {
   return markdown
     .replace(/^#{1,6}\s+/gm, "") // headings
+    .replace(/```[\s\S]*?```/g, (m) => m.replace(/```\w*\n?/g, "").trim()) // fenced code blocks
     .replace(/\*\*([^*]+)\*\*/g, "$1") // bold
     .replace(/\*([^*]+)\*/g, "$1") // italic
     .replace(/`([^`]+)`/g, "$1") // inline code
+    .replace(/!\[([^\]]*)\]\([^)]+\)/g, "$1") // images
     .replace(/\[([^\]]+)\]\([^)]+\)/g, "$1") // links
-    .replace(/^[-*+]\s+/gm, "") // list markers
+    .replace(/^\d+\.\s+/gm, "") // numbered lists
+    .replace(/^[-*+]\s+/gm, "") // unordered list markers
     .replace(/^>\s+/gm, "") // blockquotes
     .replace(/^---+$/gm, "") // horizontal rules
+    .replace(/^\|.*\|$/gm, (row) =>
+      /^[\s|:-]+$/.test(row)
+        ? ""
+        : row
+            .replace(/^\||\|$/g, "")
+            .replace(/\|/g, " — ")
+            .trim(),
+    ) // tables
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
     .replace(/\n{3,}/g, "\n\n")
     .trim();
 }
@@ -479,12 +575,16 @@ export function looksLikeWebSearchPrompt(prompt: string): boolean {
   const text = prompt.toLowerCase();
 
   const patterns = [
-    /\b(latest|recent|current|today|yesterday|this week|news)\b/,
-    /\b(search the web|look online|find online|search online|web search|google)\b/,
-    /\b(documentation|docs|release notes|changelog|blog post|article)\b/,
-    /\bwhat changed\b/,
+    /\b(search the web|look online|find online|search online|web search)\b/,
+    /\b(official documentation|official docs|api docs|api reference)\b/,
+    /\b(latest version|latest release|release notes|what's new)\b/,
+    /\b(current price|current status|today's|yesterday's|this week's)\b/,
+    /\bnews about\b/,
+    /\bwhat changed in\b/,
     /\bup to date\b/,
     /\bon the web\b/,
+    /\bgoogle\s+(for|how|what|why|when)\b/,
+    /\b(find|look up|check)\s+.{0,20}\b(online|on the web|on the internet)\b/,
   ];
 
   return patterns.some((re) => re.test(text));

@@ -10,10 +10,10 @@ Main behavior:
 
 - registers `websearch` and `webfetch` tools with pi
 - keyless web search via Brave and DuckDuckGo HTML fallback
-- webpage fetching with HTML-to-Markdown conversion (Turndown)
-- model-generated answers grounded in fetched page content
+- webpage fetching with HTML-to-Markdown conversion (Turndown), saved to a temp file
+- agent reads fetched content in chunks via the read tool
 - prompt steering: detects URLs and web-search intent to auto-activate tools
-- token-aware: keeps results compact, trims pages to relevant sections
+- token-aware: keeps search results compact, trims oversized pages
 
 ## Important files
 
@@ -28,7 +28,7 @@ Main behavior:
 LLM-callable tools:
 
 - `websearch` — runs a keyless web search by scraping public search engines
-- `webfetch` — fetches a URL, extracts content, answers a question about it
+- `webfetch` — fetches a URL, converts to markdown, saves to a temp file for reading
 
 ## Development conventions
 

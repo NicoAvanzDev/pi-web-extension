@@ -4,6 +4,7 @@ import {
   trimLargeDocument,
   stripMarkdownFormatting,
   urlToHash,
+  validateFetchUrl,
   looksLikeUrlPrompt,
   looksLikeWebSearchPrompt,
   htmlToMarkdown,
@@ -26,6 +27,15 @@ describe("extractSnippet", () => {
   it("truncates to 160 characters", () => {
     const long = "a".repeat(300);
     expect(extractSnippet(long, "title").length).toBe(160);
+  });
+
+  it("strips leading title text from snippet", () => {
+    const raw = "My Title and then the real snippet text follows here";
+    expect(extractSnippet(raw, "My Title")).toBe("and then the real snippet text follows here");
+  });
+
+  it("returns empty when snippet is only the title", () => {
+    expect(extractSnippet("My Title  ", "My Title")).toBe("");
   });
 });
 
@@ -87,6 +97,22 @@ describe("stripMarkdownFormatting", () => {
   it("collapses excessive newlines", () => {
     expect(stripMarkdownFormatting("a\n\n\n\nb")).toBe("a\n\nb");
   });
+
+  it("strips fenced code blocks", () => {
+    expect(stripMarkdownFormatting("```js\nconsole.log(1)\n```")).toBe("console.log(1)");
+  });
+
+  it("removes numbered list markers", () => {
+    expect(stripMarkdownFormatting("1. first\n2. second")).toBe("first\nsecond");
+  });
+
+  it("extracts image alt text", () => {
+    expect(stripMarkdownFormatting("![alt text](image.png)")).toBe("alt text");
+  });
+
+  it("decodes common HTML entities", () => {
+    expect(stripMarkdownFormatting("&amp; &lt; &gt;")).toBe("& < >");
+  });
 });
 
 describe("urlToHash", () => {
@@ -101,6 +127,75 @@ describe("urlToHash", () => {
 
   it("returns different hashes for different URLs", () => {
     expect(urlToHash("https://example.com")).not.toBe(urlToHash("https://other.com"));
+  });
+});
+
+describe("validateFetchUrl", () => {
+  it("accepts https URLs", () => {
+    expect(() => validateFetchUrl("https://example.com")).not.toThrow();
+  });
+
+  it("accepts http URLs", () => {
+    expect(() => validateFetchUrl("http://example.com")).not.toThrow();
+  });
+
+  it("rejects data: URIs", () => {
+    expect(() => validateFetchUrl("data:text/html,<h1>hi</h1>")).toThrow("Unsupported URL scheme");
+  });
+
+  it("rejects file: URIs", () => {
+    expect(() => validateFetchUrl("file:///etc/passwd")).toThrow("Unsupported URL scheme");
+  });
+
+  it("rejects javascript: URIs", () => {
+    expect(() => validateFetchUrl("javascript:alert(1)")).toThrow("Unsupported URL scheme");
+  });
+
+  it("rejects ftp: URIs", () => {
+    expect(() => validateFetchUrl("ftp://evil.com/payload")).toThrow("Unsupported URL scheme");
+  });
+
+  it("rejects localhost", () => {
+    expect(() => validateFetchUrl("http://localhost:3000")).toThrow("private or internal");
+  });
+
+  it("rejects 127.0.0.1", () => {
+    expect(() => validateFetchUrl("http://127.0.0.1:8080")).toThrow("private or internal");
+  });
+
+  it("rejects 169.254.x.x metadata endpoints", () => {
+    expect(() => validateFetchUrl("http://169.254.169.254/latest/meta-data/")).toThrow(
+      "private or internal",
+    );
+  });
+
+  it("rejects 10.x.x.x private ranges", () => {
+    expect(() => validateFetchUrl("http://10.0.0.1/admin")).toThrow("private or internal");
+  });
+
+  it("rejects 192.168.x.x private ranges", () => {
+    expect(() => validateFetchUrl("http://192.168.1.1")).toThrow("private or internal");
+  });
+
+  it("rejects 172.16-31.x.x private ranges", () => {
+    expect(() => validateFetchUrl("http://172.16.0.1")).toThrow("private or internal");
+    expect(() => validateFetchUrl("http://172.31.255.1")).toThrow("private or internal");
+  });
+
+  it("allows 172.32.x.x (not private)", () => {
+    expect(() => validateFetchUrl("http://172.32.0.1")).not.toThrow();
+  });
+
+  it("rejects .local domains", () => {
+    expect(() => validateFetchUrl("http://myserver.local/api")).toThrow("private or internal");
+  });
+
+  it("rejects .internal domains", () => {
+    expect(() => validateFetchUrl("http://service.internal/health")).toThrow("private or internal");
+  });
+
+  it("rejects invalid URLs", () => {
+    expect(() => validateFetchUrl("not-a-url")).toThrow("Invalid URL");
   });
 });
 
@@ -123,7 +218,7 @@ describe("looksLikeUrlPrompt", () => {
 });
 
 describe("looksLikeWebSearchPrompt", () => {
-  it("detects 'latest' keyword", () => {
+  it("detects 'latest version'", () => {
     expect(looksLikeWebSearchPrompt("What is the latest version of Node?")).toBe(true);
   });
 
@@ -131,12 +226,40 @@ describe("looksLikeWebSearchPrompt", () => {
     expect(looksLikeWebSearchPrompt("search the web for React hooks")).toBe(true);
   });
 
-  it("detects 'documentation'", () => {
-    expect(looksLikeWebSearchPrompt("Find the documentation for Vite")).toBe(true);
+  it("detects 'official documentation'", () => {
+    expect(looksLikeWebSearchPrompt("Find the official documentation for Vite")).toBe(true);
   });
 
   it("returns false for unrelated prompts", () => {
     expect(looksLikeWebSearchPrompt("Refactor this function")).toBe(false);
+  });
+
+  it("does not trigger on 'current' alone", () => {
+    expect(looksLikeWebSearchPrompt("set current to 5")).toBe(false);
+  });
+
+  it("does not trigger on 'docs' alone", () => {
+    expect(looksLikeWebSearchPrompt("read the docs folder")).toBe(false);
+  });
+
+  it("does not trigger on 'changelog' alone", () => {
+    expect(looksLikeWebSearchPrompt("update the changelog file")).toBe(false);
+  });
+
+  it("does not trigger on 'news' alone", () => {
+    expect(looksLikeWebSearchPrompt("fix the news component")).toBe(false);
+  });
+
+  it("does not trigger on 'article' alone", () => {
+    expect(looksLikeWebSearchPrompt("add an article element")).toBe(false);
+  });
+
+  it("does not trigger on 'google' alone", () => {
+    expect(looksLikeWebSearchPrompt("rename google variable")).toBe(false);
+  });
+
+  it("detects 'news about' pattern", () => {
+    expect(looksLikeWebSearchPrompt("any news about the React 20 release?")).toBe(true);
   });
 });
 
