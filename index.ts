@@ -38,6 +38,7 @@ const MAX_SEARCH_SNIPPET_CHARS = 160;
 const MAX_MARKDOWN_CHARS = 6_000;
 const LOW_CONTEXT_MARKDOWN_CHARS = 3_500;
 const FETCH_ANSWER_MAX_TOKENS = 450;
+const FALLBACK_EXCERPT_CHARS = 1_200;
 const STOPWORDS = new Set([
   "a",
   "an",
@@ -532,6 +533,12 @@ async function summarizeWithPiModel(
   ctx: ExtensionContext,
   signal?: AbortSignal,
 ): Promise<string> {
+  const fallback = buildWebfetchFallbackAnswer(input);
+
+  if (!input.markdown.trim()) {
+    return fallback;
+  }
+
   if (!ctx.model) {
     throw new Error("No active pi model available. Use /login or configure a model first.");
   }
@@ -578,17 +585,45 @@ async function summarizeWithPiModel(
     },
   );
 
-  const text = response.content
-    .filter((c): c is { type: "text"; text: string } => c.type === "text")
-    .map((c) => c.text)
+  const text = extractModelText(response.content);
+  if (text) return text;
+
+  return fallback;
+}
+
+export function extractModelText(content: Array<{ type: string; text?: string }>): string {
+  return content
+    .filter(
+      (c): c is { type: "text"; text: string } => c.type === "text" && typeof c.text === "string",
+    )
+    .map((c) => c.text.trim())
+    .filter(Boolean)
     .join("\n")
     .trim();
+}
 
-  if (!text) {
-    throw new Error("The model returned an empty response");
+export function buildWebfetchFallbackAnswer(input: {
+  url: string;
+  title: string;
+  prompt: string;
+  markdown: string;
+}): string {
+  const excerpt = compactWhitespace(input.markdown).slice(0, FALLBACK_EXCERPT_CHARS).trim();
+
+  const header = [
+    "The page was fetched, but the model did not return a usable text answer.",
+    `Question: ${input.prompt}`,
+    input.title ? `Title: ${input.title}` : undefined,
+    `URL: ${input.url}`,
+  ]
+    .filter(Boolean)
+    .join("\n");
+
+  if (!excerpt) {
+    return `${header}\n\nI also could not extract meaningful readable text from the page.`;
   }
 
-  return text;
+  return `${header}\n\nRelevant excerpt:\n${excerpt}`;
 }
 
 export function looksLikeUrlPrompt(prompt: string): boolean {

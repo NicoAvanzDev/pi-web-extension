@@ -48,7 +48,7 @@ Runs a keyless web search by scraping public search engines. Tries Brave first, 
 
 ### `webfetch`
 
-Fetches a URL, strips non-content elements, converts the HTML to Markdown via Turndown, selects the most relevant sections using keyword scoring, then asks the active pi model to answer the user's question based on the excerpt.
+Fetches a URL, strips non-content elements, converts the HTML to Markdown via Turndown, selects the most relevant sections using keyword scoring, then asks the active pi model to answer the user's question based on the excerpt. If the model returns no usable text, it falls back to returning the relevant excerpt instead of failing.
 
 ### Prompt steering
 

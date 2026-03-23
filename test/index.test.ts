@@ -10,6 +10,8 @@ import {
   looksLikeUrlPrompt,
   looksLikeWebSearchPrompt,
   htmlToMarkdown,
+  extractModelText,
+  buildWebfetchFallbackAnswer,
 } from "../index.ts";
 
 describe("extractSnippet", () => {
@@ -180,6 +182,48 @@ describe("looksLikeWebSearchPrompt", () => {
 
   it("returns false for unrelated prompts", () => {
     expect(looksLikeWebSearchPrompt("Refactor this function")).toBe(false);
+  });
+});
+
+describe("extractModelText", () => {
+  it("joins text parts and trims whitespace", () => {
+    expect(
+      extractModelText([
+        { type: "text", text: " Hello " },
+        { type: "image" },
+        { type: "text", text: "world" },
+      ]),
+    ).toBe("Hello\nworld");
+  });
+
+  it("returns empty string when there is no text content", () => {
+    expect(extractModelText([{ type: "image" }])).toBe("");
+  });
+});
+
+describe("buildWebfetchFallbackAnswer", () => {
+  it("includes a relevant excerpt when markdown exists", () => {
+    const result = buildWebfetchFallbackAnswer({
+      url: "https://example.com",
+      title: "Example",
+      prompt: "What does it say?",
+      markdown: "# Heading\n\nSome useful content here.",
+    });
+
+    expect(result).toContain("The page was fetched");
+    expect(result).toContain("Relevant excerpt:");
+    expect(result).toContain("Some useful content here.");
+  });
+
+  it("mentions missing readable text when markdown is empty", () => {
+    const result = buildWebfetchFallbackAnswer({
+      url: "https://example.com",
+      title: "",
+      prompt: "What does it say?",
+      markdown: "   ",
+    });
+
+    expect(result).toContain("could not extract meaningful readable text");
   });
 });
 
