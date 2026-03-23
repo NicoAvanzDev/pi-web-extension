@@ -26,9 +26,9 @@
     "build": "echo 'nothing to build'",
     "test": "vitest run",
     "lint": "oxlint",
-    "fmt": "oxfmt .",
-    "fmt:check": "oxfmt --check .",
-    "check": "tsc --noEmit && vitest run && oxlint && oxfmt --check .",
+    "fmt": "oxfmt \"**/*.ts\"",
+    "fmt:check": "oxfmt --check \"**/*.ts\"",
+    "check": "tsc --noEmit && vitest run && oxlint && oxfmt --check \"**/*.ts\"",
     "prepublishOnly": "npm pack --dry-run"
   },
   "dependencies": {
