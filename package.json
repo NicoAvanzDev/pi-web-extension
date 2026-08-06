@@ -44,7 +44,7 @@
     "vitest": "^4.1.0"
   },
   "peerDependencies": {
-    "@mariozechner/pi-coding-agent": ">=0.61.0",
+    "@earendil-works/pi-coding-agent": ">=0.74.0",
     "@sinclair/typebox": ">=0.34.0"
   },
   "engines": {
