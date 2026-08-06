@@ -226,6 +226,18 @@ describe("looksLikeWebSearchPrompt", () => {
     expect(looksLikeWebSearchPrompt("search the web for React hooks")).toBe(true);
   });
 
+  it("detects 'websearch' tool name", () => {
+    expect(looksLikeWebSearchPrompt("use websearch to find the latest docs")).toBe(true);
+  });
+
+  it("detects 'webfetch' tool name", () => {
+    expect(looksLikeWebSearchPrompt("call webfetch on https://example.com")).toBe(true);
+  });
+
+  it("detects 'web fetch' phrase", () => {
+    expect(looksLikeWebSearchPrompt("web fetch https://example.com")).toBe(true);
+  });
+
   it("detects 'official documentation'", () => {
     expect(looksLikeWebSearchPrompt("Find the official documentation for Vite")).toBe(true);
   });
