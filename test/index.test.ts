@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import {
+  default as piWeb,
   extractSnippet,
   trimLargeDocument,
   stripMarkdownFormatting,
@@ -9,6 +10,32 @@ import {
   looksLikeWebSearchPrompt,
   htmlToMarkdown,
 } from "../index.ts";
+
+function createFakePi() {
+  const handlers = new Map<string, Array<(payload?: unknown) => unknown>>();
+  let activeTools: string[] = [];
+  const pi = {
+    on(event: string, handler: (payload?: unknown) => unknown) {
+      const list = handlers.get(event) ?? [];
+      list.push(handler);
+      handlers.set(event, list);
+    },
+    emit(event: string, payload?: unknown) {
+      return Promise.all((handlers.get(event) ?? []).map((handler) => handler(payload)));
+    },
+    registerTool() {},
+    getActiveTools() {
+      return [...activeTools];
+    },
+    setActiveTools(tools: string[]) {
+      activeTools = [...tools];
+    },
+  };
+  return {
+    pi,
+    getActiveTools: () => [...activeTools],
+  };
+}
 
 describe("extractSnippet", () => {
   it("returns trimmed text up to max length", () => {
@@ -260,6 +287,50 @@ describe("looksLikeWebSearchPrompt", () => {
 
   it("detects 'news about' pattern", () => {
     expect(looksLikeWebSearchPrompt("any news about the React 20 release?")).toBe(true);
+  });
+});
+
+describe("piWeb tool gating", () => {
+  const piType = null as unknown as Parameters<typeof piWeb>[0];
+
+  it("activates web tools on matching prompt", async () => {
+    const { pi, getActiveTools } = createFakePi();
+    piWeb(pi as unknown as typeof piType);
+    await pi.emit("session_start");
+    const [result] = await pi.emit("before_agent_start", {
+      prompt: "search the web for React hooks",
+      systemPrompt: "base",
+    });
+    expect(getActiveTools()).toEqual(expect.arrayContaining(["websearch", "webfetch"]));
+    expect((result as { systemPrompt: string }).systemPrompt).toContain("## pi-web steering");
+  });
+
+  it("keeps tools active on non-matching follow-up", async () => {
+    const { pi, getActiveTools } = createFakePi();
+    piWeb(pi as unknown as typeof piType);
+    await pi.emit("session_start");
+    await pi.emit("before_agent_start", {
+      prompt: "search the web for pi docs",
+      systemPrompt: "",
+    });
+    await pi.emit("before_agent_start", {
+      prompt: "Let's start with 1st",
+      systemPrompt: "",
+    });
+    expect(getActiveTools()).toEqual(expect.arrayContaining(["websearch", "webfetch"]));
+  });
+
+  it("session_start resets tools", async () => {
+    const { pi, getActiveTools } = createFakePi();
+    piWeb(pi as unknown as typeof piType);
+    await pi.emit("session_start");
+    await pi.emit("before_agent_start", {
+      prompt: "fetch https://example.com",
+      systemPrompt: "",
+    });
+    expect(getActiveTools()).toContain("webfetch");
+    await pi.emit("session_start");
+    expect(getActiveTools()).toEqual([]);
   });
 });
 

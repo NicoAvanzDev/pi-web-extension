@@ -61,8 +61,10 @@ export default function piWeb(pi: ExtensionAPI) {
     const likelyNeedsWeb = looksLikeWebSearchPrompt(prompt);
     const needsWebTools = hasUrl || likelyNeedsWeb;
 
-    setWebToolsActive(pi, needsWebTools);
+    // Do not deactivate on non-matching turns: tools stay active for
+    // follow-ups like "Let's start with 1st" after a search.
     if (!needsWebTools) return;
+    setWebToolsActive(pi, true);
 
     const instructions: string[] = [];
 
