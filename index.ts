@@ -580,6 +580,7 @@ export function looksLikeWebSearchPrompt(prompt: string): boolean {
 
   const patterns = [
     /\b(search the web|look online|find online|search online|web search)\b/,
+    /\b(web fetch|webfetch|websearch)\b/,
     /\b(official documentation|official docs|api docs|api reference)\b/,
     /\b(latest version|latest release|release notes|what's new)\b/,
     /\b(current price|current status|today's|yesterday's|this week's)\b/,
