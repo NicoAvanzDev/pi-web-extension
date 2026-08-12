@@ -1,5 +1,9 @@
-import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
-import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, truncateHead } from "@mariozechner/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import {
+  DEFAULT_MAX_BYTES,
+  DEFAULT_MAX_LINES,
+  truncateHead,
+} from "@earendil-works/pi-coding-agent";
 import { Type, type Static } from "@sinclair/typebox";
 import { createHash } from "node:crypto";
 import { mkdir, writeFile } from "node:fs/promises";
@@ -578,6 +582,7 @@ export function looksLikeWebSearchPrompt(prompt: string): boolean {
 
   const patterns = [
     /\b(search the web|look online|find online|search online|web search)\b/,
+    /\b(web fetch|webfetch|websearch)\b/,
     /\b(official documentation|official docs|api docs|api reference)\b/,
     /\b(latest version|latest release|release notes|what's new)\b/,
     /\b(current price|current status|today's|yesterday's|this week's)\b/,
